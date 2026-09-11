@@ -20,8 +20,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +38,35 @@ DATA_DIR = Path(tempfile.mkdtemp(prefix="mtd_e2e_"))
 
 SERVER = None
 PASSED = 0
+MOCK_LLM_PORT = 8911
+MOCK_SUMMARY = "MOCK_MINUTES_OK: 会议要点已生成。"
+mock_llm_state = {"last_prompt": ""}
+
+
+class _MockLLMHandler(BaseHTTPRequestHandler):
+    """OpenAI-compatible chat completions stub for verifying the refine path."""
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length) or b"{}")
+        mock_llm_state["last_prompt"] = body.get("messages", [{}])[0].get("content", "")
+        payload = json.dumps(
+            {"choices": [{"message": {"content": MOCK_SUMMARY}}]}
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *args):
+        pass
+
+
+def start_mock_llm():
+    server = HTTPServer(("127.0.0.1", MOCK_LLM_PORT), _MockLLMHandler)
+    threading.Thread(target=server.serve_forever, daemon=True, name="mock-llm").start()
+    return server
 
 
 def check(name: str, cond: bool, detail: str = ""):
@@ -48,9 +79,26 @@ def check(name: str, cond: bool, detail: str = ""):
     print(f"  ok: {name}")
 
 
+def wait_ready(task_id: int, headers: dict, timeout_s: int = 15) -> dict:
+    """Refinement is async now — poll until the task lands on ready."""
+    detail = {}
+    for _ in range(timeout_s * 2):
+        detail = requests.get(f"{BASE}/api/tasks/{task_id}", headers=headers, timeout=10).json()
+        if detail["status"] == "ready":
+            return detail
+        time.sleep(0.5)
+    return detail
+
+
 def start_server():
     global SERVER
-    env = dict(os.environ, MTD_LEASE_SECONDS="2")
+    env = dict(
+        os.environ,
+        MTD_LEASE_SECONDS="2",
+        MTD_LLM_BASE_URL=f"http://127.0.0.1:{MOCK_LLM_PORT}/v1",
+        MTD_LLM_API_KEY="mock-key",
+        MTD_LLM_MODEL="mock-model",
+    )
     SERVER = subprocess.Popen(
         [
             sys.executable,
@@ -101,11 +149,13 @@ WKEY = {"X-Worker-Key": WORKER_KEY}
 def main():
     print("== meeting_service e2e ==")
     shutil.rmtree(DATA_DIR, ignore_errors=True)
+    mock_llm = start_mock_llm()
     start_server()
     try:
         run_tests()
     finally:
         stop_server()
+        mock_llm.shutdown()
         shutil.rmtree(DATA_DIR, ignore_errors=True)
     print(f"\nALL {PASSED} CHECKS PASSED")
 
@@ -168,7 +218,7 @@ def run_tests():
         headers=WKEY,
         json={"text": text, "segments": segments, "duration_sec": 3.0, "worker_meta": {"model": "fake"}},
     )
-    check("result accepted", r.status_code == 200 and r.json()["status"] == "ready", r.text)
+    check("result accepted (async refining)", r.status_code == 200 and r.json()["status"] == "refining", r.text)
 
     r = requests.post(
         f"{BASE}/worker/tasks/{task_id}/result",
@@ -176,11 +226,15 @@ def run_tests():
     )
     check("duplicate result rejected", r.status_code == 409)
 
-    r = requests.get(f"{BASE}/api/tasks/{task_id}", headers=AUTH).json()
-    check("task ready", r["status"] == "ready")
+    r = wait_ready(task_id, AUTH)
+    check("task ready after async refine", r["status"] == "ready", json.dumps(r)[:300])
     check("transcript stored", r["transcript"]["segments"] == segments)
     stats = r["summary"]["stats"]
     check("speaker stats", stats["speaker_count"] == 2 and stats["speech_sec"] == 2.3, json.dumps(stats))
+    check("llm summary generated", r["summary"]["summary_text"] == MOCK_SUMMARY, str(r["summary"])[:200])
+    check("llm model recorded", r["summary"]["llm_model"] == "mock-model")
+    check("llm prompt carried transcript", "大家好，我们开始会议" in mock_llm_state["last_prompt"])
+    check("llm prompt structured", "会议纪要" in mock_llm_state["last_prompt"])
 
     # audio playback for owner
     r = requests.get(f"{BASE}/api/tasks/{task_id}/audio", headers=AUTH)
@@ -213,6 +267,8 @@ def run_tests():
                             "segments": [{"start": 0.1, "end": 0.9, "speaker": "S01", "text": "hi"}]},
     )
     check("reclaimed task finishes", r.status_code == 200)
+    r = wait_ready(task2, AUTH)
+    check("reclaimed task ready (async refine)", r["status"] == "ready", r["status"])
 
     # -- explicit failure -------------------------------------------------
     print("[failure path]")

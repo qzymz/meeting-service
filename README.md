@@ -120,11 +120,14 @@ python test_split.py        # 切片/说话人对齐单元测试（仅需 numpy�
 | `MTD_LEASE_SECONDS` | `3600` | 任务租约时长，超时未完成自动回收 |
 | `MTD_MAX_UPLOAD_MB` | `500` | 单个音频上传上限 |
 | `MTD_HOST` / `MTD_PORT` | `127.0.0.1` / `8000` | 监听地址（PM2 部署时用） |
-| `MTD_LLM_BASE_URL` | 空 | OpenAI 兼容 API 地址 |
+| `MTD_LLM_BASE_URL` | 空 | OpenAI 兼容 API 地址，如 DeepSeek `https://api.deepseek.com/v1`、GLM `https://open.bigmodel.cn/api/paas/v4`、Qwen `https://dashscope.aliyuncs.com/compatible-mode/v1` |
 | `MTD_LLM_API_KEY` | 空 | LLM API key |
-| `MTD_LLM_MODEL` | 空 | 模型名，如 `gpt-4o-mini` / `glm-4.7` |
+| `MTD_LLM_MODEL` | 空 | 模型名，如 `deepseek-chat` / `glm-4.7` / `qwen-plus` |
+| `MTD_LLM_MAX_CHARS` | `24000` | 送入 LLM 的转写文本上限（超长取头尾，中段省略） |
 
-LLM 三项全填才生成 AI 纪要；LLM 失败不影响转写结果返回。
+LLM 三项全填才生成 AI 纪要；精炼在服务端**后台异步**执行（worker 上报即返回，
+任务状态短暂停留在「整理纪要中」），LLM 失败不影响转写结果返回。已完成的旧任务
+不会追溯生成纪要。
 
 worker 端参数（`python -m worker.main --help` 查看全部）：`--chunk-seconds`
 （超长音频切分阈值，默认 1500 秒）、`--split-search-window`（切点在静音区

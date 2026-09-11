@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -12,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from . import auth
-from .db import Database, PENDING, PROCESSING, utcnow
+from .db import Database, PENDING, PROCESSING, REFINING, utcnow
 from .refine import refine
 from .storage import ALLOWED_AUDIO_EXTS, Storage
 
@@ -251,9 +252,18 @@ def create_app() -> FastAPI:
             raise HTTPException(409, f"Task in status '{row['status']}', expected '{PROCESSING}'")
         if not db.store_result(task_id, body.text, body.segments, body.duration_sec, body.worker_meta):
             raise HTTPException(409, "Failed to store result")
-        summary = refine(body.text, body.segments)
-        db.mark_ready(task_id, summary)
-        return {"status": "ready"}
+
+        # LLM refinement runs in the background so the worker's HTTP call
+        # returns immediately — slow LLMs must not look like failed uploads.
+        def _finish():
+            try:
+                summary = refine(body.text, body.segments)
+            except Exception as exc:  # transcript is already safe; never lose it
+                summary = {"stats": None, "summary_text": None, "llm_model": None, "llm_error": str(exc)}
+            db.mark_ready(task_id, summary)
+
+        threading.Thread(target=_finish, daemon=True, name=f"refine-{task_id}").start()
+        return {"status": REFINING}
 
     @app.post("/worker/tasks/{task_id}/failure")
     def submit_failure(task_id: int, body: FailureBody, _: None = Depends(require_worker)):
