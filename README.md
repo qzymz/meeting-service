@@ -18,6 +18,10 @@
 - 用户端网页由服务器直接挂载在 `/`，浏览器打开即用（录音自动转 16kHz WAV 上传）；
 - 任务状态机 `pending → processing → refining → ready`，原子认领 + 租约超时回收；
 - LLM 纪要可选：配置任意 OpenAI 兼容接口即自动生成会议纪要，失败不影响转写。
+- **超长音频自动切片**：超过 `--chunk-seconds`（默认 25 分钟）的录音在静音边界
+  自动切分，逐段转写后时间戳偏移拼接；跨段说话人可选声纹对齐（装
+  `resemblyzer`+`webrtcvad-wheels` 即启用，未安装时跨段说话人给全新编号，宁可
+  拆开不误合并）。
 
 ## 目录结构
 
@@ -75,7 +79,10 @@ uv venv .venv --python 3.12
 source .venv/bin/activate                       # Windows: .venv\Scripts\activate
 uv pip install -e ".[torch-runtime]" --torch-backend=auto
 
-# 2.2 拉取本仓库并启动 worker（保持在同一 venv 中）
+# 2.2 （可选）启用跨切片说话人声纹对齐
+pip install resemblyzer webrtcvad-wheels
+
+# 2.3 拉取本仓库并启动 worker（保持在同一 venv 中）
 git clone https://github.com/qzymz/meeting-service.git
 cd meeting-service
 python -m worker.main \
@@ -97,7 +104,8 @@ worker 并行消费。
 
 ```bash
 pip install -r requirements.txt
-python test_e2e.py
+python test_e2e.py          # 端到端（假worker，无需GPU）
+python test_split.py        # 切片/说话人对齐单元测试（仅需 numpy）
 ```
 
 启动真实服务器子进程 + 假 worker，覆盖 24 项检查：注册登录、上传鉴权、原子认领、
@@ -117,6 +125,11 @@ python test_e2e.py
 | `MTD_LLM_MODEL` | 空 | 模型名，如 `gpt-4o-mini` / `glm-4.7` |
 
 LLM 三项全填才生成 AI 纪要；LLM 失败不影响转写结果返回。
+
+worker 端参数（`python -m worker.main --help` 查看全部）：`--chunk-seconds`
+（超长音频切分阈值，默认 1500 秒）、`--split-search-window`（切点在静音区
+搜索的范围，默认 90 秒）、`--align-threshold`（跨片说话人声纹匹配阈值，
+默认 0.72）、`--download-attempts`（下载重试次数）。
 
 ## API 概览
 

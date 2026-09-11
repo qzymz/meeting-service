@@ -22,8 +22,11 @@ try:
         build_transcription_messages,
         dtype_from_name,
         generate_transcription,
+        load_audio_item,
         resolve_device,
     )
+    from .audio_split import split_wave
+    from .speaker_align import SpeakerAligner
 except ImportError as exc:  # standalone repo: model package is an external dep
     raise SystemExit(
         "This worker needs the MOSS-Transcribe-Diarize model package in the same\n"
@@ -86,10 +89,14 @@ class Worker:
         self.dtype_name = args.dtype
         self.max_new_tokens = args.max_new_tokens
         self.prompt = args.prompt
+        self.chunk_seconds = args.chunk_seconds
+        self.split_search_window = args.split_search_window
+        self.align_threshold = args.align_threshold
         self.work_dir = Path(args.work_dir)
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self._model = None
         self._processor = None
+        self._embed_fn = None
 
     # ------------------------------------------------------------- helpers
 
@@ -176,11 +183,21 @@ class Worker:
 
     def transcribe(self, audio_path: Path, duration_hint: float | None):
         model, processor, device, dtype = self._ensure_model()
+        duration = duration_hint or self._probe_duration(audio_path) or 300.0
+        if duration > self.chunk_seconds:
+            LOGGER.info(
+                "audio %.0fs exceeds chunk budget %.0fs — splitting",
+                duration, self.chunk_seconds,
+            )
+            return self._transcribe_chunked(audio_path, duration, model, processor, device, dtype)
+        return self._transcribe_single(audio_path, model, processor, device, dtype)
+
+    def _transcribe_single(self, audio_path: Path, model, processor, device, dtype):
         if self.max_new_tokens:
             max_new_tokens = self.max_new_tokens
         else:
             # ~18 tokens per speech second keeps long meetings within budget.
-            duration = duration_hint or self._probe_duration(audio_path) or 300.0
+            duration = self._probe_duration(audio_path) or 300.0
             max_new_tokens = max(2048, min(65536, int(duration * 18)))
 
         messages = build_transcription_messages(str(audio_path), prompt=self.prompt)
@@ -201,6 +218,7 @@ class Worker:
         meta = {
             "model": self.model_id,
             "device": str(device),
+            "mode": "single",
             "generated_tokens": result["generated_tokens"],
             "elapsed_sec": round(time.time() - start, 2),
             "max_new_tokens": max_new_tokens,
@@ -210,6 +228,143 @@ class Worker:
             len(segments), result["generated_tokens"], time.time() - start,
         )
         return result["text"], segments, meta
+
+    def _embedder(self):
+        """Voice-embedding fn for cross-chunk speaker alignment, or None."""
+        if self._embed_fn is not None:
+            return self._embed_fn
+        try:
+            import numpy as np
+            import torch
+            from resemblyzer import VoiceEncoder, preprocess_wav
+
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            encoder = VoiceEncoder(device, verbose=False)
+            sr = 16000
+
+            def embed(chunk_wave: np.ndarray, spans: list[tuple[float, float]]):
+                slices = [
+                    chunk_wave[max(0, int(s * sr)):int(e * sr)] for s, e in spans
+                    if e - s > 0.2
+                ]
+                if not slices:
+                    return None
+                merged = np.concatenate(slices).astype(np.float32)
+                if len(merged) < sr // 2:
+                    return None
+                wav = preprocess_wav(merged, source_sr=sr)
+                if len(wav) < sr // 2:
+                    return None
+                return encoder.embed_utterance(wav)
+
+            self._embed_fn = embed
+            LOGGER.info("speaker alignment enabled (resemblyzer on %s)", device)
+        except Exception:
+            self._embed_fn = False  # sentinel: tried and unavailable
+            LOGGER.warning(
+                "resemblyzer unavailable — cross-chunk speakers will get fresh "
+                "labels instead of being merged (pip install resemblyzer webrtcvad-wheels)",
+                exc_info=True,
+            )
+        if self._embed_fn:
+            return self._embed_fn
+        return None
+
+    def _transcribe_chunked(self, audio_path: Path, duration: float, model, processor, device, dtype):
+        import numpy as np
+        import soundfile as sf
+
+        wave = load_audio_item(str(audio_path), sampling_rate=16000)
+        parts = split_wave(wave, 16000, self.chunk_seconds, self.split_search_window)
+        LOGGER.info("split into %d chunks", len(parts))
+
+        embed_fn = self._embedder()
+        aligner = SpeakerAligner(self.align_threshold)
+        texts: list[str] = []
+        all_segments: list[dict] = []
+        generated = 0
+        fresh_labels = 0  # labels minted for speakers that could not be embedded
+        start = time.time()
+        alignment_mode = "resemblyzer" if embed_fn else "none"
+
+        for i, (chunk_wave, offset) in enumerate(parts):
+            chunk_path = self.work_dir / f"chunk_{audio_path.stem}_{i}.wav"
+            sf.write(chunk_path, chunk_wave, 16000)
+            try:
+                chunk_dur = len(chunk_wave) / 16000.0
+                max_new_tokens = self.max_new_tokens or max(
+                    2048, min(65536, int(chunk_dur * 18))
+                )
+                messages = build_transcription_messages(str(chunk_path), prompt=self.prompt)
+                result = generate_transcription(
+                    model,
+                    processor,
+                    messages,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    device=device,
+                    dtype=dtype,
+                )
+                generated += result["generated_tokens"]
+                texts.append(result["text"])
+
+                segments = [
+                    {"start": seg.start + offset, "end": seg.end + offset,
+                     "speaker": seg.speaker, "text": seg.text}
+                    for seg in parse_transcript(result["text"])
+                ]
+
+                if embed_fn:
+                    local: dict[str, list[tuple[float, float]]] = {}
+                    for seg in segments:
+                        local.setdefault(seg["speaker"], []).append(
+                            (seg["start"] - offset, seg["end"] - offset)
+                        )
+                    local_emb = {}
+                    for spk, spans in local.items():
+                        try:
+                            emb = embed_fn(chunk_wave, spans)
+                        except Exception:
+                            LOGGER.warning("embedding failed for speaker %s", spk, exc_info=True)
+                            emb = None
+                        if emb is not None:
+                            local_emb[spk] = emb
+                    mapping = aligner.add_chunk(local_emb) if local_emb else {}
+                else:
+                    # no embeddings: never merge across chunks — assign fresh labels
+                    mapping = {}
+                used: dict[str, str] = {}
+                for seg in segments:
+                    g = mapping.get(seg["speaker"])
+                    if g is None:
+                        # mint once per unmapped local label within this chunk
+                        if seg["speaker"] not in used:
+                            used[seg["speaker"]] = f"S{len(aligner.centroids) + fresh_labels + 1:02d}"
+                            fresh_labels += 1
+                        g = used[seg["speaker"]]
+                    seg["speaker"] = g
+                all_segments.extend(segments)
+                LOGGER.info(
+                    "chunk %d/%d: %d segments, %d tokens (%.0fs of audio)",
+                    i + 1, len(parts), len(segments), result["generated_tokens"], chunk_dur,
+                )
+            finally:
+                chunk_path.unlink(missing_ok=True)
+
+        meta = {
+            "model": self.model_id,
+            "device": str(device),
+            "mode": "chunked",
+            "chunks": len(parts),
+            "speaker_alignment": alignment_mode,
+            "generated_tokens": generated,
+            "elapsed_sec": round(time.time() - start, 2),
+        }
+        LOGGER.info(
+            "task done (chunked): %d segments, %d tokens in %.1fs",
+            len(all_segments), generated, time.time() - start,
+        )
+        return "\n".join(texts), all_segments, meta
 
     @staticmethod
     def _probe_duration(path: Path) -> float | None:
@@ -289,6 +444,9 @@ def main(argv=None):
     parser.add_argument("--poll-interval", type=int, default=10)
     parser.add_argument("--lease-seconds", type=int, default=3600)
     parser.add_argument("--download-attempts", type=int, default=4, help="retries for audio download over flaky links")
+    parser.add_argument("--chunk-seconds", type=int, default=1500, help="split audio longer than this at silence boundaries (25 min default)")
+    parser.add_argument("--split-search-window", type=int, default=90, help="seconds around each boundary to search for a quiet cut point")
+    parser.add_argument("--align-threshold", type=float, default=0.72, help="cosine similarity for cross-chunk speaker matching")
     parser.add_argument("--model", default="OpenMOSS-Team/MOSS-Transcribe-Diarize")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--dtype", default="bf16")
