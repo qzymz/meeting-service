@@ -98,7 +98,10 @@
 
 <script>
 "use strict";
-const API = "";
+// Auto-detect deployment prefix: served at "/" -> "", at "/meeting/" -> "/meeting".
+// All API calls below go through this base, so reverse-proxy subpath deployments
+// (location /meeting/ { proxy_pass http://127.0.0.1:8100/; }) just work.
+const API = location.pathname.replace(/\/[^/]*$/, "");
 let token = localStorage.getItem("mtd_token") || "";
 let username = localStorage.getItem("mtd_username") || "";
 let tasks = [];              // cached list
