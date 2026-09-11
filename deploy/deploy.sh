@@ -56,7 +56,9 @@ ensure_venv() {
     VENV_PY="$VENV_DIR/Scripts/python.exe"
   else
     say "创建虚拟环境 $VENV_DIR ..."
-    "$PYTHON" -m venv "$VENV_DIR"
+    if ! "$PYTHON" -m venv "$VENV_DIR"; then
+      fail "venv 创建失败。Ubuntu/Debian 常见原因：缺少 python3-venv，先 apt install python3.12-venv 再重跑"
+    fi
     if [[ -f "$VENV_DIR/bin/python" ]]; then
       VENV_PY="$VENV_DIR/bin/python"
     else
@@ -137,7 +139,7 @@ case "${1:-install}" in
   update)   cmd_update ;;
   status)   pm2 status "$APP_NAME" ;;
   logs)     pm2 logs "$APP_NAME" ;;
-  restart)  pm2 restart "$APP_NAME" --update-env ;;
+  restart)  pm2 startOrReload "$DEPLOY_DIR/ecosystem.config.js" ;;  # startOrReload 会重读 env 文件（pm2 restart --update-env 不会）
   stop)     pm2 stop "$APP_NAME" ;;
   *) echo "用法: $0 [install|update|status|logs|restart|stop]" >&2; exit 1 ;;
 esac

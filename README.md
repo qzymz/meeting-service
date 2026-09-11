@@ -140,6 +140,8 @@ LLM 三项全填才生成 AI 纪要；LLM 失败不影响转写结果返回。
 - 用反向代理（Nginx/Caddy）终结 **HTTPS**，会议录音是高敏数据；
 - `MTD_WORKER_KEY` 泄露等于开放所有用户录音下载，务必强随机并保密；
 - 磁盘按 16kHz WAV ≈ 115MB/小时增长，规划定期清理或改对象存储直传；
+- 部署在 frp 等内网穿透隧道后，隧道可能回收空闲 keep-alive 连接导致偶发断连：
+  worker 轮询已内置异常重试，不受影响；脚本化访问建议加 `Connection: close` 或重试；
 - 多模型端天然并行（认领原子化）；SQLite 单机足够，多服务器时再换 PostgreSQL。
 
 ## License
