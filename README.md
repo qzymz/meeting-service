@@ -56,6 +56,11 @@ bash deploy/deploy.sh                    # 一键：建venv→装依赖→生成
 `bash deploy/deploy.sh restart` 生效。开机自启执行一次 `pm2 save && pm2 startup`。
 HTTPS 反代示例见 `deploy/nginx-meeting.conf.example`。
 
+**手机/平板录音必须 HTTPS**（浏览器只在安全上下文开放麦克风，明文 HTTP 下
+`navigator.mediaDevices` 为 undefined）。免备案方案：DuckDNS 免费子域名 +
+8443 端口 + DNS 验证签 Let's Encrypt 证书，完整步骤见
+`deploy/nginx-meeting-https.example`；临时测试可用其中的 cloudflared 快速隧道。
+
 手动前台运行（调试用）：`python run_server.py --host 0.0.0.0 --port 8000`。
 
 ### 2. 模型端（GPU 机器，无需公网 IP）

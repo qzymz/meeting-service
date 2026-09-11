@@ -1,0 +1,59 @@
+# HTTPS 反向代理（手机/平板录音必需——浏览器只在 HTTPS 安全上下文开放麦克风）
+#
+# 方案特点：
+#   - 用 DuckDNS 免费子域名 + DNS 验证签 Let's Encrypt 证书，不需要 ICP 备案
+#     （国内服务器未备案域名走 80/443 会被云厂商拦截，所以监听 8443）
+#   - 手机浏览器打开 https://<域名>:8443 即可授权麦克风录音
+#
+# 服务器上执行（Ubuntu 24.04，假设域名取 yourname.duckdns.org）：
+#   1) 注册 https://www.duckdns.org 创建子域名，A 记录填服务器公网 IP，记下 token
+#   2) certbot + DuckDNS 插件（snap 路线，避开系统 pip 的 PEP668 限制）：
+#      sudo snap install core && sudo snap refresh core
+#      sudo snap install --classic certbot
+#      sudo snap set certbot trust-plugin-with-root=ok
+#      sudo snap install certbot-dns-duckdns
+#      sudo mkdir -p /var/lib/duckdns && echo "dns_duckdns_token=<你的token>" | sudo tee /var/lib/duckdns/token.ini
+#      sudo chmod 600 /var/lib/duckdns/token.ini
+#   3) 签证书（DNS 验证，不需要开放 80 端口）：
+#      sudo certbot certonly --dns-duckdns \
+#        --dns-duckdns-credentials /var/lib/duckdns/token.ini \
+#        -d yourname.duckdns.org
+#   4) 复制本文件到 /etc/nginx/sites-available/meeting-https 并改域名，
+#      sudo ln -s /etc/nginx/sites-available/meeting-https /etc/nginx/sites-enabled/
+#      sudo nginx -t && sudo systemctl reload nginx
+#   5) 云安全组放行 8443/tcp
+#   续期：certbot 定时器自动完成（DNS 验证可无人值守）
+#
+# 备选：临时测试可用 cloudflared 快速隧道立即获得合法 HTTPS 地址（无需域名/端口）：
+#   wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O /usr/local/bin/cloudflared
+#   chmod +x /usr/local/bin/cloudflared
+#   cloudflared tunnel --url http://localhost:8000
+#   # 输出形如 https://xxxx.trycloudflare.com，手机直接打开即可录音
+#   # 缺点：地址随机且重启即换，国内访问 CF 边缘速度看运气，仅建议临时用
+#
+# 手机访问：https://yourname.duckdns.org:8443
+
+server {
+    listen 8443 ssl;
+    http2 on;
+    server_name yourname.duckdns.org;          # 改成你的 DuckDNS 域名
+
+    ssl_certificate     /etc/letsencrypt/live/yourname.duckdns.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/yourname.duckdns.org/privkey.pem;
+
+    # 上传音频走原始 body，放宽体积限制（与服务端 MTD_MAX_UPLOAD_MB 对齐）
+    client_max_body_size 600m;
+
+    # 长录音上传/下载耗时，放宽超时
+    proxy_read_timeout 600s;
+    proxy_send_timeout 600s;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;      # 与 MTD_PORT 对齐
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+    }
+}
