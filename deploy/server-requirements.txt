@@ -1,0 +1,5 @@
+# Minimal deps for the public server only — no torch, no model package needed.
+# The model worker additionally needs: uv pip install -e ".[torch-runtime]" --torch-backend=auto
+fastapi>=0.115
+uvicorn>=0.30
+requests>=2.31

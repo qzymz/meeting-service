@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>会议实录 · MOSS Meeting Service</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --line:#262b36; --text:#e6e9f0; --muted:#8b93a7; --accent:#5b8cff; --ok:#3ecf8e; --warn:#f5b455; --err:#f07178; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif; }
+  .wrap { max-width:980px; margin:0 auto; padding:24px 16px 80px; }
+  h1 { font-size:20px; } h1 span { color:var(--muted); font-size:13px; font-weight:normal; margin-left:10px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; margin-bottom:16px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  input[type=text],input[type=password] { background:#0f1115; border:1px solid var(--line); color:var(--text); border-radius:8px; padding:8px 12px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:8px 16px; cursor:pointer; font-size:14px; }
+  button.secondary { background:#232838; color:var(--text); }
+  button.danger { background:#a33d47; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .muted { color:var(--muted); font-size:12.5px; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; }
+  .pill.pending{background:#3a3f52}.pill.processing{background:#3d5a86}.pill.refining{background:#6b5a2e}.pill.ready{background:#26543f;color:#c9f5e2}.pill.failed{background:#5c2f34;color:#ffd7da}
+  .task-item { padding:10px 12px; border:1px solid var(--line); border-radius:10px; margin-bottom:8px; cursor:pointer; display:flex; justify-content:space-between; gap:8px; align-items:center; }
+  .task-item:hover { border-color:var(--accent); }
+  .task-item.active { border-color:var(--accent); background:#1b2030; }
+  table.segs { width:100%; border-collapse:collapse; margin-top:10px; }
+  table.segs td, table.segs th { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  .spk { font-weight:600; padding:1px 8px; border-radius:6px; font-size:12px; }
+  .progress { height:6px; background:#232838; border-radius:4px; overflow:hidden; margin-top:6px; }
+  .progress > div { height:100%; background:var(--accent); width:0%; transition:width .2s; }
+  pre.summary { white-space:pre-wrap; background:#12151d; border:1px solid var(--line); border-radius:8px; padding:12px; }
+  a { color:var(--accent); }
+  .hidden { display:none; }
+  .rec-dot { width:10px; height:10px; background:var(--err); border-radius:50%; display:inline-block; animation:blink 1s infinite; margin-right:6px; }
+  @keyframes blink { 50% {opacity:.2;} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>会议实录 <span>MOSS-Transcribe-Diarize · 转写 + 说话人分离 + 纪要</span></h1>
+
+  <!-- 登录 -->
+  <div id="authCard" class="card">
+    <div class="row">
+      <input type="text" id="username" placeholder="用户名" style="width:160px">
+      <input type="password" id="password" placeholder="密码（≥6位）" style="width:180px">
+      <button id="btnLogin">登录</button>
+      <button id="btnRegister" class="secondary">注册</button>
+      <span class="muted">token 保存在本地 localStorage</span>
+    </div>
+  </div>
+
+  <!-- 主界面 -->
+  <div id="mainUI" class="hidden">
+    <div class="card">
+      <div class="row">
+        <button id="btnRec">● 开始录音</button>
+        <span id="recTimer" class="muted hidden"><span class="rec-dot"></span>00:00</span>
+        <span class="muted">或</span>
+        <label class="muted" style="cursor:pointer">
+          选择音频/视频文件 <input type="file" id="fileInput" accept="audio/*,video/*" style="display:none">
+        </label>
+        <span style="flex:1"></span>
+        <span id="whoami" class="muted"></span>
+        <button id="btnLogout" class="secondary">退出</button>
+      </div>
+      <div id="prepInfo" class="muted hidden" style="margin-top:8px"></div>
+      <div class="progress hidden" id="upProgress"><div></div></div>
+    </div>
+
+    <div class="card hidden" id="resultCard">
+      <div class="row" style="justify-content:space-between">
+        <div><b id="taskTitle"></b> <span id="taskStatus" class="pill pending"></span></div>
+        <div class="row">
+          <button id="btnSRT" class="secondary">导出 SRT</button>
+          <button id="btnJSON" class="secondary">导出 JSON</button>
+          <a id="btnAudio" href="#">原始音频</a>
+        </div>
+      </div>
+      <div id="taskError" class="muted" style="color:var(--err)"></div>
+      <div id="llmSummary" class="hidden"><h3>AI 纪要</h3><pre class="summary"></pre></div>
+      <div id="statsBox"></div>
+      <table class="segs hidden" id="segTable">
+        <thead><tr><th style="width:150px">时间</th><th style="width:64px">说话人</th><th>内容</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h3 style="margin:0 0 10px">我的任务</h3>
+      <div id="taskList"><span class="muted">暂无任务</span></div>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const API = "";
+let token = localStorage.getItem("mtd_token") || "";
+let username = localStorage.getItem("mtd_username") || "";
+let tasks = [];              // cached list
+let currentTaskId = null;    // detail being shown
+let pollTimer = null;
+let mediaRecorder = null, recChunks = [], recStartTime = 0, recTimerId = null;
+
+const STATUS_LABEL = {pending:"排队中", processing:"模型转写中", refining:"整理纪要中", ready:"已完成", failed:"失败"};
+const SPK_COLORS = ["#5b8cff","#3ecf8e","#f5b455","#e06fcf","#6fd6e0","#f07178","#a0a7ff","#ffd479"];
+
+const $ = (id) => document.getElementById(id);
+
+// ------------------------------------------------------------------ auth
+async function api(path, opts = {}) {
+  const headers = Object.assign({"Content-Type": "application/json"}, opts.headers || {});
+  if (token) headers["Authorization"] = "Bearer " + token;
+  const resp = await fetch(API + path, Object.assign({}, opts, {headers}));
+  if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).detail || resp.status);
+  return resp.json();
+}
+
+async function doAuth(isRegister) {
+  const u = $("username").value.trim(), p = $("password").value;
+  if (!u || !p) return alert("请输入用户名和密码");
+  try {
+    const r = await api("/api/auth/" + (isRegister ? "register" : "login"),
+      {method: "POST", body: JSON.stringify({username: u, password: p})});
+    token = r.token; username = r.username;
+    localStorage.setItem("mtd_token", token); localStorage.setItem("mtd_username", username);
+    enterMain();
+  } catch (e) { alert("失败: " + e.message); }
+}
+
+function enterMain() {
+  $("authCard").classList.add("hidden");
+  $("mainUI").classList.remove("hidden");
+  $("whoami").textContent = "👤 " + username;
+  refreshList();
+  pollTimer = setInterval(refreshList, 4000);
+}
+
+$("btnLogin").onclick = () => doAuth(false);
+$("btnRegister").onclick = () => doAuth(true);
+$("btnLogout").onclick = () => {
+  token = ""; username = "";
+  localStorage.removeItem("mtd_token"); localStorage.removeItem("mtd_username");
+  location.reload();
+};
+
+// ------------------------------------------------------------ audio prep
+// Decode any recorded/uploaded media to 16 kHz mono WAV (the model's native
+// frontend), so no server-side ffmpeg is needed.
+async function toWav16k(blob) {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const decoded = await ctx.decodeAudioData(await blob.arrayBuffer());
+  ctx.close();
+  const sr = 16000, len = Math.max(1, Math.ceil(decoded.duration * sr));
+  const off = new OfflineAudioContext(1, len, sr);
+  const src = off.createBufferSource(); src.buffer = decoded;
+  src.connect(off.destination); src.start();
+  const rendered = await off.startRendering();
+  const f32 = rendered.getChannelData(0);
+  const wav = new ArrayBuffer(44 + f32.length * 2);
+  const v = new DataView(wav);
+  const ws = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  ws(0, "RIFF"); v.setUint32(4, 36 + f32.length * 2, true); ws(8, "WAVEfmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true); ws(36, "data");
+  v.setUint32(40, f32.length * 2, true);
+  let o = 44;
+  for (let i = 0; i < f32.length; i++, o += 2) {
+    const s = Math.max(-1, Math.min(1, f32[i]));
+    v.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return {blob: new Blob([wav], {type: "audio/wav"}), duration: decoded.duration};
+}
+
+function uploadWithProgress(blob, filename, duration) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const url = `${API}/api/tasks?filename=${encodeURIComponent(filename)}&duration=${duration.toFixed(2)}`;
+    xhr.open("POST", url);
+    xhr.setRequestHeader("Authorization", "Bearer " + token);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        $("upProgress").classList.remove("hidden");
+        $("upProgress").firstElementChild.style.width = (100 * e.loaded / e.total).toFixed(1) + "%";
+      }
+    };
+    xhr.onload = () => {
+      $("upProgress").classList.add("hidden");
+      if (xhr.status >= 200 && xhr.status < 300) resolve(JSON.parse(xhr.responseText));
+      else reject(new Error(xhr.responseText));
+    };
+    xhr.onerror = () => reject(new Error("网络错误"));
+    xhr.send(blob);
+  });
+}
+
+async function handleMedia(blob, displayName) {
+  $("prepInfo").classList.remove("hidden");
+  try {
+    $("prepInfo").textContent = "正在转换为 16kHz WAV…";
+    const {blob: wav, duration} = await toWav16k(blob);
+    $("prepInfo").textContent = `时长 ${duration.toFixed(1)}s · ${wav.size} 字节 · 上传中…`;
+    const r = await uploadWithProgress(wav, displayName.replace(/\.\w+$/, "") + ".wav", duration);
+    $("prepInfo").textContent = `已上传，任务 #${r.task_id} 排队中`;
+    currentTaskId = r.task_id;
+    refreshList();
+    showTask(r.task_id);
+  } catch (e) {
+    $("prepInfo").textContent = "上传失败: " + e.message;
+  }
+}
+
+$("fileInput").onchange = (e) => {
+  const f = e.target.files[0];
+  if (f) handleMedia(f, f.name);
+  e.target.value = "";
+};
+
+// -------------------------------------------------------------- recorder
+$("btnRec").onclick = async () => {
+  if (mediaRecorder && mediaRecorder.state === "recording") { mediaRecorder.stop(); return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+    const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "";
+    mediaRecorder = mime ? new MediaRecorder(stream, {mimeType: mime}) : new MediaRecorder(stream);
+    recChunks = [];
+    mediaRecorder.ondataavailable = (e) => e.data.size && recChunks.push(e.data);
+    mediaRecorder.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      clearInterval(recTimerId);
+      $("recTimer").classList.add("hidden");
+      $("btnRec").textContent = "● 开始录音";
+      $("btnRec").classList.remove("danger");
+      const blob = new Blob(recChunks, {type: mediaRecorder.mimeType});
+      const ext = blob.type.includes("webm") ? "webm" : "m4a";
+      handleMedia(blob, `录音_${new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19)}.${ext}`);
+    };
+    mediaRecorder.start(1000);
+    recStartTime = Date.now();
+    $("recTimer").classList.remove("hidden");
+    $("btnRec").textContent = "■ 停止录音";
+    $("btnRec").classList.add("danger");
+    recTimerId = setInterval(() => {
+      const s = Math.floor((Date.now() - recStartTime) / 1000);
+      $("recTimer").innerHTML = `<span class="rec-dot"></span>${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+    }, 500);
+  } catch (e) { alert("无法访问麦克风: " + e.message); }
+};
+
+// ----------------------------------------------------------------- tasks
+async function refreshList() {
+  try { tasks = (await api("/api/tasks")).tasks; } catch { return; }
+  const box = $("taskList");
+  if (!tasks.length) { box.innerHTML = '<span class="muted">暂无任务</span>'; return; }
+  box.innerHTML = tasks.map(t => `
+    <div class="task-item ${t.id === currentTaskId ? "active" : ""}" onclick="showTask(${t.id})">
+      <div>#${t.id} ${escapeHtml(t.filename)}
+        <div class="muted">${t.created_at.replace("T", " ").slice(0, 19)} · ${t.duration_sec ? t.duration_sec.toFixed(0) + "s" : fmtSize(t.size_bytes)}</div>
+      </div>
+      <span class="pill ${t.status}">${STATUS_LABEL[t.status] || t.status}</span>
+    </div>`).join("");
+  // auto-open detail if it just became ready
+  if (currentTaskId) showTask(currentTaskId, true);
+}
+
+window.showTask = async function (id, silent) {
+  currentTaskId = id;
+  let t;
+  try { t = await api(`/api/tasks/${id}`); } catch { return; }
+  if (!silent) refreshList();
+  $("resultCard").classList.remove("hidden");
+  $("taskTitle").textContent = `#${t.id} ${t.filename}`;
+  const pill = $("taskStatus");
+  pill.className = "pill " + t.status;
+  pill.textContent = STATUS_LABEL[t.status] || t.status;
+  $("taskError").textContent = t.error || "";
+  $("btnAudio").href = `${API}/api/tasks/${id}/audio`;
+  const done = t.status === "ready" || t.status === "failed";
+  $("btnSRT").disabled = $("btnJSON").disabled = t.status !== "ready";
+  const segs = (t.transcript && t.transcript.segments) || [];
+  const table = $("segTable");
+  table.classList.toggle("hidden", !segs.length);
+  table.tBodies[0].innerHTML = segs.map(s => `
+    <tr>
+      <td class="muted">${fmtTime(s.start)} → ${fmtTime(s.end)}</td>
+      <td>${spkBadge(s.speaker)}</td>
+      <td>${escapeHtml(s.text)}</td>
+    </tr>`).join("");
+  const sum = t.summary;
+  if (done && sum && sum.stats && sum.stats.speakers.length) {
+    $("statsBox").innerHTML = "<h3>说话人统计</h3>" + sum.stats.speakers.map(s =>
+      `<span class="spk" style="background:${spkColor(s.speaker)}22;color:${spkColor(s.speaker)}">${s.speaker}</span>
+       ${s.segments} 段 · ${Math.round(s.speech_sec)}s（${Math.round(s.share * 100)}%）&nbsp;&nbsp;`).join("");
+    if (sum.summary_text) {
+      $("llmSummary").classList.remove("hidden");
+      $("llmSummary").querySelector("pre").textContent = sum.summary_text;
+    } else {
+      $("llmSummary").classList.add("hidden");
+    }
+  } else {
+    $("statsBox").innerHTML = "";
+    $("llmSummary").classList.add("hidden");
+  }
+  window._currentTask = t;
+};
+
+function spkColor(spk) {
+  const n = parseInt(String(spk).replace(/\D/g, "")) || 0;
+  return SPK_COLORS[(n - 1 + SPK_COLORS.length) % SPK_COLORS.length];
+}
+function spkBadge(spk) {
+  return `<span class="spk" style="background:${spkColor(spk)}22;color:${spkColor(spk)}">${escapeHtml(spk)}</span>`;
+}
+function fmtTime(sec) {
+  const s = Math.floor(sec), m = Math.floor(s / 60), h = Math.floor(m / 60);
+  return (h ? h + ":" : "") + String(m % 60).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
+}
+function fmtSize(n) { return n > 1048576 ? (n / 1048576).toFixed(1) + "MB" : (n / 1024).toFixed(0) + "KB"; }
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+// ----------------------------------------------------------------- export
+function download(name, text, mime) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], {type: mime}));
+  a.download = name; a.click(); URL.revokeObjectURL(a.href);
+}
+function toSrtTime(sec) {
+  const ms = Math.round((sec % 1) * 1000), s = Math.floor(sec);
+  return `${String(Math.floor(s / 3600)).padStart(2, "0")}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}:${String(s % 60).padStart(2, "0")},${String(ms).padStart(3, "0")}`;
+}
+$("btnSRT").onclick = () => {
+  const t = window._currentTask; if (!t || !t.transcript) return;
+  const srt = t.transcript.segments.map((s, i) =>
+    `${i + 1}\n${toSrtTime(s.start)} --> ${toSrtTime(s.end)}\n[${s.speaker}] ${s.text}\n`).join("\n");
+  download(`task_${t.id}.srt`, srt, "text/plain;charset=utf-8");
+};
+$("btnJSON").onclick = () => {
+  const t = window._currentTask; if (!t) return;
+  download(`task_${t.id}.json`, JSON.stringify(t, null, 2), "application/json");
+};
+
+// ------------------------------------------------------------------- init
+if (token) enterMain();
+</script>
+</body>
+</html>

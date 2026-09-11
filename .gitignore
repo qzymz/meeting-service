@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.py[cod]
+data/
+worker_tmp/
+deploy/env/
+*.log
