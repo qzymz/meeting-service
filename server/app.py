@@ -171,6 +171,28 @@ def create_app() -> FastAPI:
     def list_my_tasks(user: dict = Depends(current_user)):
         return {"tasks": [task_to_json(dict(r), include_result=False) for r in db.list_tasks(user["id"])]}
 
+    @app.delete("/api/tasks/{task_id}")
+    def delete_my_task(task_id: int, user: dict = Depends(current_user)):
+        row = task_or_404(task_id)
+        if row["user_id"] != user["id"]:
+            raise HTTPException(403, "Not your task")
+        if not db.delete_task(task_id, user["id"]):
+            raise HTTPException(404, "Task not found")
+        storage.audio_path(row["id"], row["audio_ext"]).unlink(missing_ok=True)
+        return {"deleted": task_id}
+
+    @app.delete("/api/tasks")
+    def delete_bulk(scope: str = Query("finished", pattern="^(finished|all)$"), user: dict = Depends(current_user)):
+        rows = db.list_tasks(user["id"], limit=100000)
+        if scope == "finished":
+            rows = [r for r in rows if r["status"] in ("ready", "failed")]
+            deleted = db.delete_finished(user["id"])
+        else:
+            deleted = db.delete_all(user["id"])
+        for r in rows:
+            storage.audio_path(r["id"], r["audio_ext"]).unlink(missing_ok=True)
+        return {"deleted": deleted}
+
     @app.get("/api/tasks/{task_id}")
     def get_my_task(task_id: int, user: dict = Depends(current_user)):
         row = task_or_404(task_id)

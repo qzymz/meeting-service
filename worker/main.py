@@ -198,6 +198,13 @@ class Worker:
 
             return sf.info(str(path)).duration
         except Exception:
+            pass
+        try:  # non-PCM containers (m4a/mp3/mov/...) — decode header via PyAV
+            import av
+
+            with av.open(str(path)) as container:
+                return float(container.duration) / 1e6 if container.duration else None
+        except Exception:
             return None
 
     def process_task(self, task):

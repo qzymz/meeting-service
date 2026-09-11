@@ -212,6 +212,28 @@ class Database:
                 (size_bytes, utcnow(), task_id),
             )
 
+    def delete_task(self, task_id: int, user_id: int) -> bool:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM tasks WHERE id = ? AND user_id = ?", (task_id, user_id)
+            )
+            return cur.rowcount > 0
+
+    def delete_finished(self, user_id: int) -> int:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM tasks WHERE user_id = ? AND status IN ('ready', 'failed')",
+                (user_id,),
+            )
+            return cur.rowcount
+
+    def delete_all(self, user_id: int) -> int:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM tasks WHERE user_id = ?", (user_id,)
+            )
+            return cur.rowcount
+
     def mark_ready(self, task_id: int, summary: dict) -> None:
         with self._lock, self._conn:
             self._conn.execute(

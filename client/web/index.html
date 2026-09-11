@@ -87,7 +87,10 @@
     </div>
 
     <div class="card">
-      <h3 style="margin:0 0 10px">我的任务</h3>
+      <div class="row" style="justify-content:space-between">
+        <h3 style="margin:0">我的任务</h3>
+        <button id="btnClear" class="secondary" onclick="clearFinished()">清空已结束</button>
+      </div>
       <div id="taskList"><span class="muted">暂无任务</span></div>
     </div>
   </div>
@@ -177,7 +180,8 @@ async function toWav16k(blob) {
 function uploadWithProgress(blob, filename, duration) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    const url = `${API}/api/tasks?filename=${encodeURIComponent(filename)}&duration=${duration.toFixed(2)}`;
+    let url = `${API}/api/tasks?filename=${encodeURIComponent(filename)}`;
+    if (duration > 0) url += `&duration=${duration.toFixed(2)}`;
     xhr.open("POST", url);
     xhr.setRequestHeader("Authorization", "Bearer " + token);
     xhr.upload.onprogress = (e) => {
@@ -199,10 +203,19 @@ function uploadWithProgress(blob, filename, duration) {
 async function handleMedia(blob, displayName) {
   $("prepInfo").classList.remove("hidden");
   try {
-    $("prepInfo").textContent = "正在转换为 16kHz WAV…";
-    const {blob: wav, duration} = await toWav16k(blob);
-    $("prepInfo").textContent = `时长 ${duration.toFixed(1)}s · ${wav.size} 字节 · 上传中…`;
-    const r = await uploadWithProgress(wav, displayName.replace(/\.\w+$/, "") + ".wav", duration);
+    // 先尝试浏览器内转 16kHz WAV；浏览器解不动的格式（微信语音、HEVC、mov 等）
+    // 回退为原始文件直传，由模型端的 PyAV/ffmpeg 解码。
+    let out = blob, name = displayName, duration = 0;
+    try {
+      $("prepInfo").textContent = "正在转换为 16kHz WAV…";
+      const conv = await toWav16k(blob);
+      out = conv.blob; duration = conv.duration;
+      name = displayName.replace(/\.\w+$/, "") + ".wav";
+    } catch (e) {
+      $("prepInfo").textContent = "浏览器无法解码此格式，改为直接上传原始文件…";
+    }
+    $("prepInfo").textContent = `时长 ${duration ? duration.toFixed(1) + "s" : "未知"} · ${out.size} 字节 · 上传中…`;
+    const r = await uploadWithProgress(out, name, duration);
     $("prepInfo").textContent = `已上传，任务 #${r.task_id} 排队中`;
     currentTaskId = r.task_id;
     refreshList();
@@ -259,7 +272,10 @@ async function refreshList() {
       <div>#${t.id} ${escapeHtml(t.filename)}
         <div class="muted">${t.created_at.replace("T", " ").slice(0, 19)} · ${t.duration_sec ? t.duration_sec.toFixed(0) + "s" : fmtSize(t.size_bytes)}</div>
       </div>
-      <span class="pill ${t.status}">${STATUS_LABEL[t.status] || t.status}</span>
+      <div class="row" style="gap:8px">
+        <span class="pill ${t.status}">${STATUS_LABEL[t.status] || t.status}</span>
+        <button class="secondary" style="padding:2px 10px" onclick="delTask(event, ${t.id})">删除</button>
+      </div>
     </div>`).join("");
   // auto-open detail if it just became ready
   if (currentTaskId) showTask(currentTaskId, true);
@@ -304,6 +320,29 @@ window.showTask = async function (id, silent) {
     $("llmSummary").classList.add("hidden");
   }
   window._currentTask = t;
+};
+
+window.delTask = async function (ev, id) {
+  ev.stopPropagation();
+  if (!confirm(`删除任务 #${id}？转写结果和录音将一并删除，不可恢复。`)) return;
+  try {
+    await api("/api/tasks/" + id, {method: "DELETE"});
+    if (currentTaskId === id) { currentTaskId = null; $("resultCard").classList.add("hidden"); }
+    refreshList();
+  } catch (e) { alert("删除失败: " + e.message); }
+};
+
+window.clearFinished = async function () {
+  if (!confirm("清空所有已完成/失败的任务？录音与结果将一并删除，不可恢复。")) return;
+  try {
+    const cur = tasks.find(t => t.id === currentTaskId);
+    const r = await api("/api/tasks?scope=finished", {method: "DELETE"});
+    if (cur && (cur.status === "ready" || cur.status === "failed")) {
+      currentTaskId = null; $("resultCard").classList.add("hidden");
+    }
+    alert(`已清理 ${r.deleted} 条`);
+    refreshList();
+  } catch (e) { alert("清理失败: " + e.message); }
 };
 
 function spkColor(spk) {

@@ -228,6 +228,29 @@ def run_tests():
     r = requests.get(f"{BASE}/api/tasks", headers=AUTH).json()
     check("list shows 3 tasks", len(r["tasks"]) == 3)
 
+    # -- cleanup / deletion -----------------------------------------------
+    print("[deletion]")
+    other_tok = requests.post(
+        f"{BASE}/api/auth/register", json={"username": user + "c", "password": "secret123"}
+    ).json()["token"]
+    r = requests.delete(
+        f"{BASE}/api/tasks/{task3}", headers={"Authorization": f"Bearer {other_tok}"}
+    )
+    check("cross-user delete forbidden", r.status_code == 403)
+
+    r = requests.delete(f"{BASE}/api/tasks/{task3}", headers=AUTH)
+    check("delete own task", r.status_code == 200 and r.json()["deleted"] == task3)
+    r = requests.get(f"{BASE}/api/tasks/{task3}", headers=AUTH)
+    check("deleted task gone", r.status_code == 404)
+
+    r = requests.delete(f"{BASE}/api/tasks?scope=finished", headers=AUTH)
+    check("bulk delete finished", r.status_code == 200 and r.json()["deleted"] == 2, r.text)
+    r = requests.get(f"{BASE}/api/tasks", headers=AUTH).json()
+    check("no ready/failed remain", all(t["status"] not in ("ready", "failed") for t in r["tasks"]))
+
+    r = requests.delete(f"{BASE}/api/tasks?scope=bogus", headers=AUTH)
+    check("bad scope rejected", r.status_code == 422)
+
 
 if __name__ == "__main__":
     main()
