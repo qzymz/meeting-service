@@ -234,6 +234,15 @@ class Database:
             )
             return cur.rowcount
 
+    def requeue(self, task_id: int) -> bool:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "UPDATE tasks SET status = ?, claimed_by = NULL, lease_until = NULL,"
+                " error = NULL, updated_at = ? WHERE id = ? AND status = ?",
+                (PENDING, utcnow(), task_id, FAILED),
+            )
+            return cur.rowcount > 0
+
     def mark_ready(self, task_id: int, summary: dict) -> None:
         with self._lock, self._conn:
             self._conn.execute(

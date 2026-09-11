@@ -261,6 +261,14 @@ def create_app() -> FastAPI:
             raise HTTPException(409, "Task already finished")
         return {"status": "failed"}
 
+    @app.post("/worker/tasks/{task_id}/requeue")
+    def requeue_failed(task_id: int, _: None = Depends(require_worker)):
+        """Put a failed task back into the queue (audio is kept on the server)."""
+        if not db.requeue(task_id):
+            row = task_or_404(task_id)
+            raise HTTPException(409, f"Task in status '{row['status']}', only failed tasks can be requeued")
+        return {"status": PENDING}
+
     return app
 
 

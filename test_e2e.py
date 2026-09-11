@@ -251,6 +251,19 @@ def run_tests():
     r = requests.delete(f"{BASE}/api/tasks?scope=bogus", headers=AUTH)
     check("bad scope rejected", r.status_code == 422)
 
+    # -- requeue failed task ------------------------------------------------
+    print("[requeue]")
+    r = requests.post(f"{BASE}/api/tasks", params={"filename": "rq.wav"}, data=make_wav(1), headers=AUTH)
+    task4 = r.json()["task_id"]
+    requests.post(f"{BASE}/worker/claim", params={"worker_id": "w4"}, headers=WKEY)
+    requests.post(f"{BASE}/worker/tasks/{task4}/failure", headers=WKEY, json={"error": "x"})
+    r = requests.post(f"{BASE}/worker/tasks/{task4}/requeue", headers=WKEY)
+    check("requeue failed task", r.status_code == 200 and r.json()["status"] == "pending", r.text)
+    r = requests.get(f"{BASE}/api/tasks/{task4}", headers=AUTH).json()
+    check("requeued task pending with cleared error", r["status"] == "pending" and r["error"] is None)
+    r = requests.post(f"{BASE}/worker/tasks/{task4}/requeue", headers=WKEY)
+    check("requeue non-failed rejected", r.status_code == 409)
+
 
 if __name__ == "__main__":
     main()

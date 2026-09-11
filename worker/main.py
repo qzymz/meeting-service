@@ -79,6 +79,7 @@ class Worker:
         self.worker_id = args.worker_id
         self.poll_interval = args.poll_interval
         self.lease_seconds = args.lease_seconds
+        self.download_attempts = args.download_attempts
         self.once = args.once
         self.model_id = args.model
         self.device_name = args.device
@@ -106,15 +107,34 @@ class Worker:
         return resp.json().get("task")
 
     def _download(self, task) -> Path:
+        """Download with retries — the public path drops long transfers occasionally."""
         path = self.work_dir / f"task_{task['id']}{task['audio_ext']}"
-        with requests.get(
-            f"{self.server}{task['download_url']}", headers=self._headers(), stream=True, timeout=300
-        ) as resp:
-            resp.raise_for_status()
-            with open(path, "wb") as fh:
-                for chunk in resp.iter_content(chunk_size=1 << 20):
-                    fh.write(chunk)
-        return path
+        part = path.with_suffix(path.suffix + ".part")
+        attempts = self.download_attempts
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                headers = dict(self._headers(), **{"Connection": "close"})
+                with requests.get(
+                    f"{self.server}{task['download_url']}",
+                    headers=headers, stream=True, timeout=(15, 180),
+                ) as resp:
+                    resp.raise_for_status()
+                    with open(part, "wb") as fh:
+                        for chunk in resp.iter_content(chunk_size=1 << 20):
+                            fh.write(chunk)
+                part.replace(path)  # only complete files get the final name
+                return path
+            except Exception as exc:
+                last_exc = exc
+                LOGGER.warning(
+                    "task %s download attempt %d/%d failed: %r",
+                    task["id"], attempt, attempts, exc,
+                )
+                part.unlink(missing_ok=True)
+                if attempt < attempts:
+                    time.sleep(min(30, 2 ** attempt))
+        raise last_exc  # type: ignore[misc]
 
     def _heartbeat_loop(self, task_id: int, stop: threading.Event):
         while not stop.wait(self.lease_seconds / 3):
@@ -268,6 +288,7 @@ def main(argv=None):
     parser.add_argument("--worker-id", default=f"worker-{int(time.time()) % 100000}")
     parser.add_argument("--poll-interval", type=int, default=10)
     parser.add_argument("--lease-seconds", type=int, default=3600)
+    parser.add_argument("--download-attempts", type=int, default=4, help="retries for audio download over flaky links")
     parser.add_argument("--model", default="OpenMOSS-Team/MOSS-Transcribe-Diarize")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--dtype", default="bf16")
