@@ -124,6 +124,7 @@ python test_split.py        # 切片/说话人对齐单元测试（仅需 numpy�
 | `MTD_LLM_API_KEY` | 空 | LLM API key |
 | `MTD_LLM_MODEL` | 空 | 模型名，如 `deepseek-chat` / `glm-4.7` / `qwen-plus` |
 | `MTD_LLM_MAX_CHARS` | `24000` | 送入 LLM 的转写文本上限（超长取头尾，中段省略） |
+| `MTD_LLM_MAX_TOKENS` | `131072` | LLM 单次输出 token 上限。思考型模型（如 GLM-5.3）先消耗推理 token 再写正文，上限过低会导致正文为空并记 `llm_error` |
 
 LLM 三项全填才生成 AI 纪要；精炼在服务端**后台异步**执行（worker 上报即返回，
 任务状态短暂停留在「整理纪要中」），LLM 失败不影响转写结果返回。已完成的旧任务

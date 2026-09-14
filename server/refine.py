@@ -65,11 +65,19 @@ def _llm_summary(text: str, base_url: str, api_key: str, model: str) -> str:
             "model": model,
             "messages": [{"role": "user", "content": SUMMARY_PROMPT + text}],
             "temperature": 0.2,
+            # thinking models burn budget on reasoning_content first; without an
+            # explicit generous cap the API default can exhaust tokens before
+            # producing any visible content (verified on glm-5.3-flash via q-api).
+            # ceiling probed on q-api: max_tokens valid range is [1,131072] (glm-5.3-flash 128K max output)
+            "max_tokens": int(os.environ.get("MTD_LLM_MAX_TOKENS", "131072")),
         },
         timeout=180,
     )
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
+    content = (resp.json()["choices"][0]["message"].get("content") or "").strip()
+    if not content:
+        raise RuntimeError("LLM returned empty content (all tokens spent on reasoning?)")
+    return content
 
 
 def refine(transcript_text: str, segments: list[dict]) -> dict:
